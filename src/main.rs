@@ -6,6 +6,7 @@ use embassy_rp::{bind_interrupts, peripherals::USB, usb, gpio};
 use embassy_time::Duration;
 use embassy_usb::class::{cdc_acm, midi};
 use embassy_usb::driver::EndpointError;
+// use embassy_futures
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -76,11 +77,11 @@ async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0
         
         loop {
             // wait for transition
-            button0.wait_for_any_edge().await;
+            button0.wait_for_falling_edge().await;
             let now = embassy_time::Instant::now();
 
             if now - last < lockout {
-                // last = now;
+                last = now;
                 continue;
             }
 
