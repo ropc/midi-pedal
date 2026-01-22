@@ -3,7 +3,7 @@
 
 use embassy_executor::Spawner;
 use embassy_rp::{bind_interrupts, peripherals::USB, usb, gpio};
-use embassy_time::Duration;
+use embassy_time::{Duration, Timer};
 use embassy_usb::class::{cdc_acm, midi};
 use embassy_usb::driver::EndpointError;
 // use embassy_futures
@@ -71,34 +71,35 @@ async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0
         defmt::info!("waiting for midi connection");
         class.wait_connection().await;
         defmt::info!("got midi connection!");
-        let lockout = Duration::from_millis(10);
-        let mut last = embassy_time::Instant::now();
-        let mut button0_is_high = true;
-        
+        let mut is_momentary = false;
+        let mut value = 0xff;  // midi value to send, first press will be 127 (ON)
+
         loop {
-            // wait for transition
-            button0.wait_for_falling_edge().await;
-            let now = embassy_time::Instant::now();
-
-            if now - last < lockout {
-                last = now;
-                continue;
-            }
-
-            button0_is_high = !button0_is_high;
+            // wait for transition 
+            button0.wait_for_low().await;
 
             // contruct usb-midi packet
             let header = 0x0b;  // usb-midi header: 0x0_ == cable number, 0x_b == CC (tells receiver how many bytes to expect)
             let status = 0xb0; // midi status: 0xb_ == Control Change msg, 0x_0 == channel 0
             let control_number = 20;
-            let value = if button0_is_high { 0x00 } else { 0xff };
             let packet = [header, status, control_number, value];
             // send packet
             let result = class.write_packet(&packet).await;
 
             defmt::debug!("sent packet {:?}: {}", packet, result);
 
-            last = now;
+            Timer::after_millis(20).await;
+            button0.wait_for_high().await;
+
+            // send depress signal
+            if (is_momentary) {
+                let packet = [0x0b, 0xb0, 20, 0x00];
+                class.write_packet(&packet).await;
+                defmt::debug!("sent packet {:?}: {}", packet, result);
+            } else {
+                // not a momentary switch: toggle value
+                value = value ^ 0xff;
+            }
         }
     }
 }
