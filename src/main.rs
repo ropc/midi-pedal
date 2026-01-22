@@ -23,9 +23,9 @@ async fn main(spawner: Spawner) -> ! {
     let usb_driver = usb::Driver::new(p.USB, Irqs);
 
     let mut config = embassy_usb::Config::new(0xdead, 0xbeef);  // vendor_id, product_id
-    config.manufacturer = Some("noone");
+    config.manufacturer = Some("ropc");
     config.product = Some("midi-pedal");
-    config.serial_number = Some("01234");
+    config.serial_number = Some("0");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
     // config.device_class =
@@ -48,8 +48,6 @@ async fn main(spawner: Spawner) -> ! {
     let mut midiClass = midi::MidiClass::new(&mut usb_builder, 1, 0, 64);
     let mut pin4 = gpio::Input::new(p.PIN_4, gpio::Pull::Up);
     pin4.set_schmitt(true);
-    // Debouncer::new(pin4, Duration::from_millis(1));
-    // pin4.set_inversion(true);
 
     let usb = usb_builder.build();
     spawner.spawn(usb_task(usb));
@@ -78,14 +76,8 @@ async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0
             // wait for transition 
             button0.wait_for_low().await;
 
-            // contruct usb-midi packet
-            let header = 0x0b;  // usb-midi header: 0x0_ == cable number, 0x_b == CC (tells receiver how many bytes to expect)
-            let status = 0xb0; // midi status: 0xb_ == Control Change msg, 0x_0 == channel 0
-            let control_number = 20;
-            let packet = [header, status, control_number, value];
-            // send packet
+            let packet = midi_packet(20, value);
             let result = class.write_packet(&packet).await;
-
             defmt::debug!("sent packet {:?}: {}", packet, result);
 
             Timer::after_millis(20).await;
@@ -93,7 +85,7 @@ async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0
 
             // send depress signal
             if (is_momentary) {
-                let packet = [0x0b, 0xb0, 20, 0x00];
+                let packet = midi_packet(20, value);
                 class.write_packet(&packet).await;
                 defmt::debug!("sent packet {:?}: {}", packet, result);
             } else {
@@ -102,6 +94,16 @@ async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0
             }
         }
     }
+}
+
+/// constructs a USB-MIDI CC packet on channel 0
+fn midi_packet(control_number: u8, value: u8) -> [u8; 4] {
+    [
+        0x0b,  // usb-midi header: 0x0_ == cable number, 0x_b == CC (tells receiver how many bytes to expect)
+        0xb0,  // midi status: 0xb_ == Control Change msg, 0x_0 == channel 0
+        control_number,
+        value
+    ]
 }
 
 type MyUsbDriver = usb::Driver<'static, USB>;
