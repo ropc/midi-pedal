@@ -4,11 +4,12 @@
 use embassy_executor::Spawner;
 use embassy_rp::{bind_interrupts, peripherals::USB, usb, gpio};
 use embassy_time::{Duration, Timer};
-use embassy_usb::class::{cdc_acm, midi};
+use embassy_usb::class::{cdc_acm, midi::MidiClass};
 use embassy_usb::driver::EndpointError;
 // use embassy_futures
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
+mod midi;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
@@ -45,7 +46,7 @@ async fn main(spawner: Spawner) -> ! {
 
     static STATE: StaticCell<cdc_acm::State> = StaticCell::new();
     let mut cdcAcmClass = cdc_acm::CdcAcmClass::new(&mut usb_builder, STATE.init(cdc_acm::State::new()), 64);
-    let mut midiClass = midi::MidiClass::new(&mut usb_builder, 1, 0, 64);
+    let mut midiClass = MidiClass::new(&mut usb_builder, 1, 0, 64);
     let mut pin4 = gpio::Input::new(p.PIN_4, gpio::Pull::Up);
     pin4.set_schmitt(true);
 
@@ -54,60 +55,27 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(midi_task(midiClass, pin4));
 
     loop {
-        defmt::info!("waiting for serial connection");
+        defmt::debug!("waiting for serial connection");
         cdcAcmClass.wait_connection().await;
-        defmt::info!("got connection");
+        defmt::info!("got serial connection");
         _ = echo(&mut cdcAcmClass).await;
     }
 }
 
 #[embassy_executor::task]
-async fn midi_task(mut device: midi::MidiClass<'static, MyUsbDriver>, mut button0: gpio::Input<'static>) -> ! {
+async fn midi_task(mut device: MidiClass<'static, MyUsbDriver>, mut button0: gpio::Input<'static>) -> ! {
     // let mut button0 = Debouncer::new(button0, Duration::from_millis(1));
-    defmt::info!("starting midi task");
+    defmt::debug!("starting midi task");
     loop {
-        defmt::info!("waiting for midi connection");
+        defmt::debug!("waiting for midi connection");
         device.wait_connection().await;
-        defmt::info!("got midi connection!");
-        let mut is_momentary = false;
-        let mut value = 0xff;  // midi value to send, first press will be 127 (ON)
-
-        loop {
-            // wait for transition 
-            button0.wait_for_low().await;
-
-            let packet = midi_packet(20, value);
-            let result = device.write_packet(&packet).await;
-            defmt::debug!("sent packet {:?}: {}", packet, result);
-
-            Timer::after_millis(20).await;
-            button0.wait_for_high().await;
-
-            // send depress signal
-            if (is_momentary) {
-                let packet = midi_packet(20, value);
-                device.write_packet(&packet).await;
-                defmt::debug!("sent packet {:?}: {}", packet, result);
-            } else {
-                // not a momentary switch: toggle value
-                value = value ^ 0xff;
-            }
-        }
+        defmt::info!("midi connected");
+        midi::run_handler(&mut device, &mut button0).await;
     }
 }
 
-/// constructs a USB-MIDI CC packet on channel 0
-fn midi_packet(control_number: u8, value: u8) -> [u8; 4] {
-    [
-        0x0b,  // usb-midi header: 0x0_ == cable number, 0x_b == CC (tells receiver how many bytes to expect)
-        0xb0,  // midi status: 0xb_ == Control Change msg, 0x_0 == channel 0
-        control_number,
-        value
-    ]
-}
-
 type MyUsbDriver = usb::Driver<'static, USB>;
-type MyUsbDevice = embassy_usb::UsbDevice<'static, MyUsbDriver>;
+pub type MyUsbDevice = embassy_usb::UsbDevice<'static, MyUsbDriver>;
 
 #[embassy_executor::task]
 async fn usb_task(mut usb: MyUsbDevice) -> ! {
