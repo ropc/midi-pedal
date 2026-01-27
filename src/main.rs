@@ -62,12 +62,12 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0: gpio::Input<'static>) -> ! {
+async fn midi_task(mut device: midi::MidiClass<'static, MyUsbDriver>, mut button0: gpio::Input<'static>) -> ! {
     // let mut button0 = Debouncer::new(button0, Duration::from_millis(1));
     defmt::info!("starting midi task");
     loop {
         defmt::info!("waiting for midi connection");
-        class.wait_connection().await;
+        device.wait_connection().await;
         defmt::info!("got midi connection!");
         let mut is_momentary = false;
         let mut value = 0xff;  // midi value to send, first press will be 127 (ON)
@@ -77,7 +77,7 @@ async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0
             button0.wait_for_low().await;
 
             let packet = midi_packet(20, value);
-            let result = class.write_packet(&packet).await;
+            let result = device.write_packet(&packet).await;
             defmt::debug!("sent packet {:?}: {}", packet, result);
 
             Timer::after_millis(20).await;
@@ -86,7 +86,7 @@ async fn midi_task(mut class: midi::MidiClass<'static, MyUsbDriver>, mut button0
             // send depress signal
             if (is_momentary) {
                 let packet = midi_packet(20, value);
-                class.write_packet(&packet).await;
+                device.write_packet(&packet).await;
                 defmt::debug!("sent packet {:?}: {}", packet, result);
             } else {
                 // not a momentary switch: toggle value
