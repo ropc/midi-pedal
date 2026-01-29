@@ -99,7 +99,6 @@ async fn main(spawner: Spawner) -> ! {
             Ok(Err(err)) => defmt::warn!("error sending packet {:?}: {:?}", packet, err),
             Err(_) => defmt::debug!("hit timeout, dropping packet, {:?}", packet),
         };
-        // defmt::debug!("sent packet {:?}: {}", packet, result);
     }
 }
 
