@@ -98,7 +98,6 @@ async fn main(spawner: Spawner) -> ! {
             with_timeout(Duration::from_millis(10), midi_device.write_packet(&packet)).await;
         defmt::debug!("sent packet {:?}: {}", packet, result);
     }
-    // }
 }
 
 type MyUsbDriver = usb::Driver<'static, USB>;
