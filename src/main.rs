@@ -52,7 +52,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let usb = usb_builder.build();
     spawner.spawn(usb_task(usb));
-    spawner.spawn(midi_task(midiClass, pin4));
+    spawner.spawn(midi_task(midiClass, pin4, spawner));
 
     loop {
         defmt::debug!("waiting for serial connection");
@@ -63,14 +63,15 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 #[embassy_executor::task]
-async fn midi_task(mut device: MidiClass<'static, MyUsbDriver>, mut button0: gpio::Input<'static>) -> ! {
+async fn midi_task(mut device: MidiClass<'static, MyUsbDriver>, mut buttons: [&'static mut gpio::Input<'static>; 6], spawner: Spawner) -> ! {
     // let mut button0 = Debouncer::new(button0, Duration::from_millis(1));
+    let handler = midi::MidiHandler::new(device, buttons);
     defmt::debug!("starting midi task");
     loop {
         defmt::debug!("waiting for midi connection");
         device.wait_connection().await;
         defmt::info!("midi connected");
-        midi::run_handler(&mut device, &mut button0).await;
+        handler.run(spawner).await;
     }
 }
 
