@@ -15,8 +15,6 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
 });
 
-static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
     defmt::info!("hello");
@@ -64,6 +62,7 @@ async fn main(spawner: Spawner) -> ! {
     let pin6 = Input::new(p.PIN_6, Pull::Up);
     let pin7 = Input::new(p.PIN_7, Pull::Up);
 
+    static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
     let sender = CHANNEL.sender();
     spawner.spawn(button_task(0, false, pin2, sender)).unwrap();
     spawner.spawn(button_task(1, false, pin3, sender)).unwrap();
@@ -82,8 +81,8 @@ async fn main(spawner: Spawner) -> ! {
 
         let control_number = button_message.button_id + 20; // use MIDI CC range 20-26
         let value = match button_message.state {
-            ButtonState::Pressed => 0xff,
-            ButtonState::Released => 0x00,
+            ButtonState::Pressed => 127,
+            ButtonState::Released => 0,
         };
         defmt::debug!(
             "got message: button_id: {}, state: {}",
@@ -103,7 +102,7 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 type MyUsbDriver = usb::Driver<'static, USB>;
-pub type MyUsbDevice = embassy_usb::UsbDevice<'static, MyUsbDriver>;
+type MyUsbDevice = embassy_usb::UsbDevice<'static, MyUsbDriver>;
 
 #[embassy_executor::task]
 async fn usb_task(mut usb: MyUsbDevice) -> ! {
@@ -178,11 +177,13 @@ async fn button_task(
 }
 
 /// constructs a USB-MIDI CC packet on channel 0
+/// 
+/// `control_number` and `value` are 7-bit numbers, first bit will be set to zero
 fn midi_packet(control_number: u8, value: u8) -> [u8; 4] {
     [
         0x0b, // usb-midi header: 0x0_ == cable number, 0x_b == CC (tells receiver how many bytes to expect)
         0xb0, // midi status: 0xb_ == Control Change msg, 0x_0 == channel 0
-        control_number,
-        value,
+        0b0111_1111 & control_number, // first bit in MIDI data byte should be 0
+        0b0111_1111 & value, // same as above
     ]
 }
