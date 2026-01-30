@@ -92,7 +92,7 @@ async fn main(spawner: Spawner) -> ! {
         );
 
         let packet = midi_packet(control_number, value);
-        // if midi device isn't connected, this will hang. instead timeout in 10ms,
+        // if midi device isn't connected, write_packet() will hang. instead timeout in 10ms,
         // essentially dropping the packet when disconnected
         match with_timeout(Duration::from_millis(10), midi_device.write_packet(&packet)).await {
             Ok(Ok(_)) => defmt::debug!("sent packet {:?}", packet),
