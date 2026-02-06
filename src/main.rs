@@ -73,12 +73,12 @@ async fn main(spawner: Spawner) -> ! {
     static SIGNAL_BUTTON_5: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
 
     let sender = CHANNEL.sender();
-    spawner.spawn(button_task(0, false, pin2, sender)).unwrap();
-    spawner.spawn(button_task(1, false, pin3, sender)).unwrap();
-    spawner.spawn(button_task(2, false, pin4, sender)).unwrap();
-    spawner.spawn(button_task(3, false, pin5, sender)).unwrap();
-    spawner.spawn(button_task(4, false, pin6, sender)).unwrap();
-    spawner.spawn(button_task(5, false, pin7, sender)).unwrap();
+    spawner.spawn(button_task(0, &SIGNAL_BUTTON_0, pin2, sender)).unwrap();
+    spawner.spawn(button_task(1, &SIGNAL_BUTTON_1, pin3, sender)).unwrap();
+    spawner.spawn(button_task(2, &SIGNAL_BUTTON_2, pin4, sender)).unwrap();
+    spawner.spawn(button_task(3, &SIGNAL_BUTTON_3, pin5, sender)).unwrap();
+    spawner.spawn(button_task(4, &SIGNAL_BUTTON_4, pin6, sender)).unwrap();
+    spawner.spawn(button_task(5, &SIGNAL_BUTTON_5, pin7, sender)).unwrap();
 
     // midi cc output loop
 
@@ -138,7 +138,7 @@ impl ButtonState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 struct ButtonConfig {
     is_momentary: bool,
 }
@@ -146,14 +146,14 @@ struct ButtonConfig {
 #[embassy_executor::task(pool_size = 6)]
 async fn button_task(
     id: u8,
-    config_source: Signal<CriticalSectionRawMutex, ButtonConfig>,
+    config_source: &'static Signal<CriticalSectionRawMutex, ButtonConfig>,
     mut button: Input<'static>,
     sender: Sender<'static, CriticalSectionRawMutex, ButtonMessage, 16>,
 ) {
     let mut is_momentary = config_source.try_take()
         .map(|conf| conf.is_momentary)
         .unwrap_or_default();
-    let mut state: ButtonState = ButtonState::On;
+    let mut prev_state: ButtonState = ButtonState::Off;
 
     loop {
         defmt::debug!("starting button{} loop", id);
@@ -166,6 +166,7 @@ async fn button_task(
                     sender.len()
                 );
 
+                let state = if is_momentary { ButtonState::On } else { prev_state.toggle() };
                 sender
                     .send(ButtonMessage {
                         button_id: id,
@@ -188,12 +189,13 @@ async fn button_task(
                         .await;
                 } else {
                     // not a momentary switch: toggle value
-                    state = state.toggle();
+                    prev_state = state;
                 }
             },
             Either::Second(config) => {
                 defmt::debug!("received button{} config.is_momentary: {}", id, config.is_momentary);
                 is_momentary = config.is_momentary;
+                prev_state = ButtonState::Off; // reset state
             },
         }
     }
