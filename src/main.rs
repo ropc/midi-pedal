@@ -50,7 +50,7 @@ async fn main(spawner: Spawner) -> ! {
         CONTROL_BUF.init([0; 64]),
     );
 
-    let mut midi_device = MidiClass::new(&mut usb_builder, 1, 0, 64);
+    let mut midi_device = MidiClass::new(&mut usb_builder, 1, 1, 64);
 
     let usb = usb_builder.build();
     spawner.spawn(usb_task(usb)).unwrap();
@@ -86,27 +86,35 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         defmt::debug!("waiting for messages");
-        let button_message = CHANNEL.receive().await;
+        let mut buf = [0; 64];
+        match select(CHANNEL.receive(), midi_device.read_packet(&mut buf)).await {
+            Either::First(button_message) => {
+                let control_number = button_message.button_id + 20; // use MIDI CC range 20-26
+                let value = match button_message.state {
+                    ButtonState::On => 127,
+                    ButtonState::Off => 0,
+                };
+                defmt::debug!(
+                    "got message: button_id: {}, state: {}",
+                    button_message.button_id,
+                    value
+                );
 
-        let control_number = button_message.button_id + 20; // use MIDI CC range 20-26
-        let value = match button_message.state {
-            ButtonState::On => 127,
-            ButtonState::Off => 0,
-        };
-        defmt::debug!(
-            "got message: button_id: {}, state: {}",
-            button_message.button_id,
-            value
-        );
-
-        let packet = midi_packet(control_number, value);
-        // if midi device isn't connected, write_packet() will hang. instead timeout in 10ms,
-        // essentially dropping the packet when disconnected
-        match with_timeout(Duration::from_millis(10), midi_device.write_packet(&packet)).await {
-            Ok(Ok(_)) => defmt::debug!("sent packet {:?}", packet),
-            Ok(Err(err)) => defmt::warn!("error sending packet {:?}: {:?}", packet, err),
-            Err(_) => defmt::debug!("hit timeout, dropping packet, {:?}", packet),
-        };
+                let packet = midi_packet(control_number, value);
+                // if midi device isn't connected, write_packet() will hang. instead timeout in 10ms,
+                // essentially dropping the packet when disconnected
+                match with_timeout(Duration::from_millis(10), midi_device.write_packet(&packet)).await {
+                    Ok(Ok(_)) => defmt::debug!("sent packet {:?}", packet),
+                    Ok(Err(err)) => defmt::warn!("error sending packet {:?}: {:?}", packet, err),
+                    Err(_) => defmt::debug!("hit timeout, dropping packet, {:?}", packet),
+                };
+            },
+            Either::Second(Ok(midi_message_size)) => {
+                let midi_message = &buf[..midi_message_size];
+                defmt::debug!("received midi message: {=[u8]:02x} (size: {})", midi_message, midi_message_size);
+            },
+            Either::Second(Err(err)) => defmt::warn!("midi error: {}", err),
+        }
     }
 }
 
