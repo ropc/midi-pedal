@@ -6,8 +6,10 @@ use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::{bind_interrupts, peripherals::USB, usb};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Sender};
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer, with_timeout};
 use embassy_usb::class::midi::MidiClass;
+use embassy_futures::select::{select, Either};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -63,6 +65,13 @@ async fn main(spawner: Spawner) -> ! {
     let pin7 = Input::new(p.PIN_7, Pull::Up);
 
     static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
+    static SIGNAL_BUTTON_0: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+    static SIGNAL_BUTTON_1: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+    static SIGNAL_BUTTON_2: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+    static SIGNAL_BUTTON_3: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+    static SIGNAL_BUTTON_4: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+    static SIGNAL_BUTTON_5: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+
     let sender = CHANNEL.sender();
     spawner.spawn(button_task(0, false, pin2, sender)).unwrap();
     spawner.spawn(button_task(1, false, pin3, sender)).unwrap();
@@ -81,8 +90,8 @@ async fn main(spawner: Spawner) -> ! {
 
         let control_number = button_message.button_id + 20; // use MIDI CC range 20-26
         let value = match button_message.state {
-            ButtonState::Pressed => 127,
-            ButtonState::Released => 0,
+            ButtonState::On => 127,
+            ButtonState::Off => 0,
         };
         defmt::debug!(
             "got message: button_id: {}, state: {}",
@@ -116,62 +125,76 @@ struct ButtonMessage {
 
 #[derive(Debug, Clone, Copy)]
 enum ButtonState {
-    Pressed,
-    Released,
+    On,
+    Off,
 }
 
 impl ButtonState {
     fn toggle(self) -> Self {
         match self {
-            ButtonState::Pressed => ButtonState::Released,
-            ButtonState::Released => ButtonState::Pressed,
+            ButtonState::On => ButtonState::Off,
+            ButtonState::Off => ButtonState::On,
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct ButtonConfig {
+    is_momentary: bool,
 }
 
 #[embassy_executor::task(pool_size = 6)]
 async fn button_task(
     id: u8,
-    is_momentary: bool,
+    config_source: Signal<CriticalSectionRawMutex, ButtonConfig>,
     mut button: Input<'static>,
     sender: Sender<'static, CriticalSectionRawMutex, ButtonMessage, 16>,
 ) {
-    let mut state: ButtonState = ButtonState::Pressed;
+    let mut is_momentary = config_source.try_take()
+        .map(|conf| conf.is_momentary)
+        .unwrap_or_default();
+    let mut state: ButtonState = ButtonState::On;
 
     loop {
-        defmt::debug!("button {} waiting for low", id);
-        // wait for transition
-        button.wait_for_low().await;
+        defmt::debug!("starting button{} loop", id);
 
-        defmt::debug!(
-            "will signal from button{}, channel has {} elements",
-            id,
-            sender.len()
-        );
+        match select(button.wait_for_low(), config_source.wait()).await {
+            Either::First(_) => {
+                defmt::debug!(
+                    "will signal from button{}, channel has {} elements",
+                    id,
+                    sender.len()
+                );
 
-        sender
-            .send(ButtonMessage {
-                button_id: id,
-                state,
-            })
-            .await;
+                sender
+                    .send(ButtonMessage {
+                        button_id: id,
+                        state,
+                    })
+                    .await;
 
-        Timer::after_millis(20).await;
-        button.wait_for_high().await;
+                Timer::after_millis(20).await;
+                button.wait_for_high().await;
 
-        defmt::debug!("button {} got hi", id);
+                defmt::debug!("button {} got hi", id);
 
-        if is_momentary {
-            // send depress signal
-            sender
-                .send(ButtonMessage {
-                    button_id: id,
-                    state: ButtonState::Released,
-                })
-                .await;
-        } else {
-            // not a momentary switch: toggle value
-            state = state.toggle();
+                if is_momentary {
+                    // send depress signal
+                    sender
+                        .send(ButtonMessage {
+                            button_id: id,
+                            state: ButtonState::Off,
+                        })
+                        .await;
+                } else {
+                    // not a momentary switch: toggle value
+                    state = state.toggle();
+                }
+            },
+            Either::Second(config) => {
+                defmt::debug!("received button{} config.is_momentary: {}", id, config.is_momentary);
+                is_momentary = config.is_momentary;
+            },
         }
     }
 }
