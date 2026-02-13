@@ -57,12 +57,12 @@ async fn main(spawner: Spawner) -> ! {
 
     // button setup
 
-    let pin2 = Input::new(p.PIN_2, Pull::Up);
-    let pin3 = Input::new(p.PIN_3, Pull::Up);
-    let pin4 = Input::new(p.PIN_4, Pull::Up);
-    let pin5 = Input::new(p.PIN_5, Pull::Up);
-    let pin6 = Input::new(p.PIN_6, Pull::Up);
-    let pin7 = Input::new(p.PIN_7, Pull::Up);
+    let button0_pin = Input::new(p.PIN_1, Pull::Up);
+    let button1_pin = Input::new(p.PIN_22, Pull::Up);
+    let button2_pin = Input::new(p.PIN_18, Pull::Up);
+    let button3_pin = Input::new(p.PIN_5, Pull::Up);
+    let button4_pin = Input::new(p.PIN_9, Pull::Up);
+    let button5_pin = Input::new(p.PIN_14, Pull::Up);
 
     static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
     static SIGNAL_BUTTON_0: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
@@ -73,12 +73,12 @@ async fn main(spawner: Spawner) -> ! {
     static SIGNAL_BUTTON_5: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
 
     let sender = CHANNEL.sender();
-    spawner.spawn(button_task(0, &SIGNAL_BUTTON_0, pin2, sender)).unwrap();
-    spawner.spawn(button_task(1, &SIGNAL_BUTTON_1, pin3, sender)).unwrap();
-    spawner.spawn(button_task(2, &SIGNAL_BUTTON_2, pin4, sender)).unwrap();
-    spawner.spawn(button_task(3, &SIGNAL_BUTTON_3, pin5, sender)).unwrap();
-    spawner.spawn(button_task(4, &SIGNAL_BUTTON_4, pin6, sender)).unwrap();
-    spawner.spawn(button_task(5, &SIGNAL_BUTTON_5, pin7, sender)).unwrap();
+    spawner.spawn(button_task(0, &SIGNAL_BUTTON_0, button0_pin, sender)).unwrap();
+    spawner.spawn(button_task(1, &SIGNAL_BUTTON_1, button1_pin, sender)).unwrap();
+    spawner.spawn(button_task(2, &SIGNAL_BUTTON_2, button2_pin, sender)).unwrap();
+    spawner.spawn(button_task(3, &SIGNAL_BUTTON_3, button3_pin, sender)).unwrap();
+    spawner.spawn(button_task(4, &SIGNAL_BUTTON_4, button4_pin, sender)).unwrap();
+    spawner.spawn(button_task(5, &SIGNAL_BUTTON_5, button5_pin, sender)).unwrap();
 
     // midi cc output loop
 
