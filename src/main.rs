@@ -111,10 +111,39 @@ async fn main(spawner: Spawner) -> ! {
             },
             Either::Second(Ok(midi_message_size)) => {
                 let midi_message = &buf[..midi_message_size];
+                // midi_message.iter().for_each(|byte| defmt::debug!(""));
                 defmt::debug!("received midi message: {=[u8]:02x} (size: {})", midi_message, midi_message_size);
+                if midi_message_size == 4 {
+                    match midi_message[..2] {
+                        [0x0b, 0xb0] => {
+                            // received CC message, only controllers 20-26 are valid
+                            let controller = midi_message[2];
+                            match controller {
+                                20..26 => {
+                                    let value = midi_message[3];
+                                    let behavior = ButtonBehavior::from(value);
+                                    let signal = match controller - 20 {
+                                        0 => Some(&SIGNAL_BUTTON_0),
+                                        1 => Some(&SIGNAL_BUTTON_1),
+                                        2 => Some(&SIGNAL_BUTTON_2),
+                                        3 => Some(&SIGNAL_BUTTON_3),
+                                        4 => Some(&SIGNAL_BUTTON_4),
+                                        5 => Some(&SIGNAL_BUTTON_5),
+                                        _ => None,
+                                    };
+                                    if let Some(signal) = signal {
+                                        signal.signal(ButtonConfig { behavior: behavior });
+                                    }
+                                },
+                                _ => (),
+                            }
+                        }
+                        _ => ()
+                    }
+                }
             },
             Either::Second(Err(err)) => defmt::warn!("midi error: {}", err),
-        }
+        };
     }
 }
 
@@ -129,6 +158,25 @@ async fn usb_task(mut usb: MyUsbDevice) -> ! {
 struct ButtonMessage {
     button_id: u8,
     state: ButtonState,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum ButtonBehavior {
+    #[default]
+    Toggle,
+    Momentary,
+    Tap,
+}
+
+impl From<u8> for ButtonBehavior {
+    fn from(value: u8) -> Self {
+        match value {
+            0x00 => ButtonBehavior::Toggle,
+            0x01 => ButtonBehavior::Momentary,
+            0x02 => ButtonBehavior::Tap,
+            _ => ButtonBehavior::Toggle, // default to toggle
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -148,7 +196,7 @@ impl ButtonState {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct ButtonConfig {
-    is_momentary: bool,
+    behavior: ButtonBehavior,
 }
 
 #[embassy_executor::task(pool_size = 6)]
@@ -158,15 +206,15 @@ async fn button_task(
     mut button: Input<'static>,
     sender: Sender<'static, CriticalSectionRawMutex, ButtonMessage, 16>,
 ) {
-    let mut is_momentary = config_source.try_take()
-        .map(|conf| conf.is_momentary)
+    let mut behavior = config_source.try_take()
+        .map(|conf| conf.behavior)
         .unwrap_or_default();
     let mut prev_state: ButtonState = ButtonState::Off;
 
+    defmt::debug!("starting button{} loop", id);
     loop {
-        defmt::debug!("starting button{} loop", id);
 
-        match select(button.wait_for_low(), config_source.wait()).await {
+        prev_state = match select(button.wait_for_low(), config_source.wait()).await {
             Either::First(_) => {
                 defmt::debug!(
                     "will signal from button{}, channel has {} elements",
@@ -174,7 +222,12 @@ async fn button_task(
                     sender.len()
                 );
 
-                let state = if is_momentary { ButtonState::On } else { prev_state.toggle() };
+                let state = match behavior {
+                    ButtonBehavior::Toggle => prev_state.toggle(),
+                    ButtonBehavior::Momentary => ButtonState::On,
+                    ButtonBehavior::Tap => ButtonState::On
+                };
+
                 sender
                     .send(ButtonMessage {
                         button_id: id,
@@ -187,7 +240,7 @@ async fn button_task(
 
                 defmt::debug!("button {} got hi", id);
 
-                if is_momentary {
+                if behavior == ButtonBehavior::Momentary {
                     // send depress signal
                     sender
                         .send(ButtonMessage {
@@ -195,15 +248,19 @@ async fn button_task(
                             state: ButtonState::Off,
                         })
                         .await;
-                } else {
-                    // not a momentary switch: toggle value
-                    prev_state = state;
+                }
+
+                // return ending state
+                match behavior {
+                    ButtonBehavior::Toggle => state,
+                    ButtonBehavior::Momentary => ButtonState::Off,
+                    ButtonBehavior::Tap => ButtonState::Off,
                 }
             },
             Either::Second(config) => {
-                defmt::debug!("received button{} config.is_momentary: {}", id, config.is_momentary);
-                is_momentary = config.is_momentary;
-                prev_state = ButtonState::Off; // reset state
+                // defmt::debug!("received button{} config.behavior: {}", id, config.behavior);
+                behavior = config.behavior;
+                ButtonState::Off // reset state
             },
         }
     }
