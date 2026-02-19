@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use defmt::Format;
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::{bind_interrupts, peripherals::USB, usb};
@@ -88,31 +89,33 @@ async fn main(spawner: Spawner) -> ! {
         defmt::debug!("waiting for messages");
         let mut buf = [0; 64];
         match select(CHANNEL.receive(), midi_device.read_packet(&mut buf)).await {
-            Either::First(button_message) => {
-                let control_number = button_message.button_id + 20; // use MIDI CC range 20-26
-                let value = match button_message.state {
-                    ButtonState::On => 127,
-                    ButtonState::Off => 0,
-                };
-                defmt::debug!(
-                    "got message: button_id: {}, state: {}",
-                    button_message.button_id,
-                    value
-                );
-
-                let packet = midi_packet(control_number, value);
-                // if midi device isn't connected, write_packet() will hang. instead timeout in 10ms,
-                // essentially dropping the packet when disconnected
-                match with_timeout(Duration::from_millis(10), midi_device.write_packet(&packet)).await {
-                    Ok(Ok(_)) => defmt::debug!("sent packet {:?}", packet),
-                    Ok(Err(err)) => defmt::warn!("error sending packet {:?}: {:?}", packet, err),
-                    Err(_) => defmt::debug!("hit timeout, dropping packet, {:?}", packet),
-                };
-            },
+            Either::First(button_message) => handle_button_message(button_message, &mut midi_device).await,
             Either::Second(Ok(midi_message_size)) => handle_midi_message(&buf, midi_message_size),
             Either::Second(Err(err)) => defmt::warn!("midi error: {}", err),
         };
     }
+}
+
+async fn handle_button_message(button_message: ButtonMessage, midi_device: &mut MidiClass<'static, MyUsbDriver>) {
+    let control_number = button_message.button_id + 20; // use MIDI CC range 20-26
+    let value = match button_message.state {
+        ButtonState::On => 127,
+        ButtonState::Off => 0,
+    };
+    defmt::debug!(
+        "got message: button_id: {}, state: {}",
+        button_message.button_id,
+        value
+    );
+
+    let packet = midi_packet(control_number, value);
+    // if midi device isn't connected, write_packet() will hang. instead timeout in 10ms,
+    // essentially dropping the packet when disconnected
+    match with_timeout(Duration::from_millis(10), midi_device.write_packet(&packet)).await {
+        Ok(Ok(_)) => defmt::debug!("sent packet {:?}", packet),
+        Ok(Err(err)) => defmt::warn!("error sending packet {:?}: {:?}", packet, err),
+        Err(_) => defmt::debug!("hit timeout, dropping packet, {:?}", packet),
+    };
 }
 
 fn handle_midi_message(message: &[u8], size: usize) {
@@ -156,7 +159,7 @@ struct ButtonMessage {
     state: ButtonState,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Format, Default, Clone, Copy, PartialEq, Eq)]
 enum ButtonBehavior {
     #[default]
     Toggle,
@@ -254,7 +257,7 @@ async fn button_task(
                 }
             },
             Either::Second(config) => {
-                // defmt::debug!("received button{} config.behavior: {}", id, config.behavior);
+                defmt::debug!("received button{} config.behavior: {}", id, config.behavior);
                 behavior = config.behavior;
                 ButtonState::Off // reset state
             },
