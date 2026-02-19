@@ -17,6 +17,14 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
 });
 
+static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
+static SIGNAL_BUTTON_0: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+static SIGNAL_BUTTON_1: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+static SIGNAL_BUTTON_2: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+static SIGNAL_BUTTON_3: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+static SIGNAL_BUTTON_4: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+static SIGNAL_BUTTON_5: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
     defmt::info!("hello");
@@ -64,14 +72,6 @@ async fn main(spawner: Spawner) -> ! {
     let button4_pin = Input::new(p.PIN_9, Pull::Up);
     let button5_pin = Input::new(p.PIN_14, Pull::Up);
 
-    static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
-    static SIGNAL_BUTTON_0: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-    static SIGNAL_BUTTON_1: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-    static SIGNAL_BUTTON_2: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-    static SIGNAL_BUTTON_3: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-    static SIGNAL_BUTTON_4: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-    static SIGNAL_BUTTON_5: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-
     let sender = CHANNEL.sender();
     spawner.spawn(button_task(0, &SIGNAL_BUTTON_0, button0_pin, sender)).unwrap();
     spawner.spawn(button_task(1, &SIGNAL_BUTTON_1, button1_pin, sender)).unwrap();
@@ -109,42 +109,38 @@ async fn main(spawner: Spawner) -> ! {
                     Err(_) => defmt::debug!("hit timeout, dropping packet, {:?}", packet),
                 };
             },
-            Either::Second(Ok(midi_message_size)) => {
-                let midi_message = &buf[..midi_message_size];
-                // midi_message.iter().for_each(|byte| defmt::debug!(""));
-                defmt::debug!("received midi message: {=[u8]:02x} (size: {})", midi_message, midi_message_size);
-                if midi_message_size == 4 {
-                    match midi_message[..2] {
-                        [0x0b, 0xb0] => {
-                            // received CC message, only controllers 20-26 are valid
-                            let controller = midi_message[2];
-                            match controller {
-                                20..26 => {
-                                    let value = midi_message[3];
-                                    let behavior = ButtonBehavior::from(value);
-                                    let signal = match controller - 20 {
-                                        0 => Some(&SIGNAL_BUTTON_0),
-                                        1 => Some(&SIGNAL_BUTTON_1),
-                                        2 => Some(&SIGNAL_BUTTON_2),
-                                        3 => Some(&SIGNAL_BUTTON_3),
-                                        4 => Some(&SIGNAL_BUTTON_4),
-                                        5 => Some(&SIGNAL_BUTTON_5),
-                                        _ => None,
-                                    };
-                                    if let Some(signal) = signal {
-                                        signal.signal(ButtonConfig { behavior: behavior });
-                                    }
-                                },
-                                _ => (),
-                            }
-                        }
-                        _ => ()
-                    }
-                }
-            },
+            Either::Second(Ok(midi_message_size)) => handle_midi_message(&buf, midi_message_size),
             Either::Second(Err(err)) => defmt::warn!("midi error: {}", err),
         };
     }
+}
+
+fn handle_midi_message(message: &[u8], size: usize) {
+    if size != 4 {
+        return;  // wrong size for CC message
+    }
+    if message[..2] != [0x0b, 0xb0] {
+        return;  // wrong headers/channel for CC message
+    }
+
+    // received CC message, only controllers 20-26 are valid
+    let controller = message[2];
+    let Some(signal) = (match controller - 20 {
+        0 => Some(&SIGNAL_BUTTON_0),
+        1 => Some(&SIGNAL_BUTTON_1),
+        2 => Some(&SIGNAL_BUTTON_2),
+        3 => Some(&SIGNAL_BUTTON_3),
+        4 => Some(&SIGNAL_BUTTON_4),
+        5 => Some(&SIGNAL_BUTTON_5),
+        _ => None,
+    }) else {
+        return;  // received message for unsupported controller
+    };
+
+    // set button behavior according to value
+    let value = message[3];
+    let behavior = ButtonBehavior::from(value);
+    signal.signal(ButtonConfig { behavior: behavior });
 }
 
 type MyUsbDriver = usb::Driver<'static, USB>;
