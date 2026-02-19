@@ -170,9 +170,9 @@ enum ButtonBehavior {
 impl From<u8> for ButtonBehavior {
     fn from(value: u8) -> Self {
         match value {
-            0x00 => ButtonBehavior::Toggle,
-            0x01 => ButtonBehavior::Momentary,
-            0x02 => ButtonBehavior::Tap,
+            0..43 => ButtonBehavior::Toggle,
+            43..86 => ButtonBehavior::Momentary,
+            86..128 => ButtonBehavior::Tap,
             _ => ButtonBehavior::Toggle, // default to toggle
         }
     }
