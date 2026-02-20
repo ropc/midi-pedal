@@ -6,11 +6,11 @@ use embassy_executor::Spawner;
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::{bind_interrupts, peripherals::USB, usb};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Sender};
-use embassy_sync::signal::Signal;
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_sync::channel::{Channel, self};
+use embassy_sync::watch::{Receiver, Watch, self};
+use embassy_time::{with_timeout, Delay, Duration, Timer};
 use embassy_usb::class::midi::MidiClass;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select6, select_array, select_slice, Either};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -19,12 +19,12 @@ bind_interrupts!(struct Irqs {
 });
 
 static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
-static SIGNAL_BUTTON_0: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-static SIGNAL_BUTTON_1: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-static SIGNAL_BUTTON_2: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-static SIGNAL_BUTTON_3: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-static SIGNAL_BUTTON_4: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
-static SIGNAL_BUTTON_5: Signal<CriticalSectionRawMutex, ButtonConfig> = Signal::new();
+static WATCH_BUTTON_0: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
+static WATCH_BUTTON_1: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
+static WATCH_BUTTON_2: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
+static WATCH_BUTTON_3: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
+static WATCH_BUTTON_4: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
+static WATCH_BUTTON_5: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) -> ! {
@@ -73,24 +73,42 @@ async fn main(spawner: Spawner) -> ! {
     let button4_pin = Input::new(p.PIN_9, Pull::Up);
     let button5_pin = Input::new(p.PIN_14, Pull::Up);
 
-    let sender = CHANNEL.sender();
-    spawner.spawn(button_task(0, &SIGNAL_BUTTON_0, button0_pin, sender)).unwrap();
-    spawner.spawn(button_task(1, &SIGNAL_BUTTON_1, button1_pin, sender)).unwrap();
-    spawner.spawn(button_task(2, &SIGNAL_BUTTON_2, button2_pin, sender)).unwrap();
-    spawner.spawn(button_task(3, &SIGNAL_BUTTON_3, button3_pin, sender)).unwrap();
-    spawner.spawn(button_task(4, &SIGNAL_BUTTON_4, button4_pin, sender)).unwrap();
-    spawner.spawn(button_task(5, &SIGNAL_BUTTON_5, button5_pin, sender)).unwrap();
+    let button_press_sender = CHANNEL.sender();
+    spawner.spawn(button_task(0, WATCH_BUTTON_0.receiver().expect("too many receivers for button0"), button0_pin, button_press_sender)).unwrap();
+    spawner.spawn(button_task(1, WATCH_BUTTON_1.receiver().expect("too many receivers for button1"), button1_pin, button_press_sender)).unwrap();
+    spawner.spawn(button_task(2, WATCH_BUTTON_2.receiver().expect("too many receivers for button2"), button2_pin, button_press_sender)).unwrap();
+    spawner.spawn(button_task(3, WATCH_BUTTON_3.receiver().expect("too many receivers for button3"), button3_pin, button_press_sender)).unwrap();
+    spawner.spawn(button_task(4, WATCH_BUTTON_4.receiver().expect("too many receivers for button4"), button4_pin, button_press_sender)).unwrap();
+    spawner.spawn(button_task(5, WATCH_BUTTON_5.receiver().expect("too many receivers for button5"), button5_pin, button_press_sender)).unwrap();
+
+    spawner.spawn(save_config_task([
+        WATCH_BUTTON_0.receiver().expect("too many receivers for button0"),
+        WATCH_BUTTON_1.receiver().expect("too many receivers for button1"),
+        WATCH_BUTTON_2.receiver().expect("too many receivers for button2"),
+        WATCH_BUTTON_3.receiver().expect("too many receivers for button3"),
+        WATCH_BUTTON_4.receiver().expect("too many receivers for button4"),
+        WATCH_BUTTON_5.receiver().expect("too many receivers for button5"),
+    ])).unwrap();
 
     // midi cc output loop
 
     defmt::debug!("starting midi controller");
+
+    let config_senders = [
+        WATCH_BUTTON_0.sender(),
+        WATCH_BUTTON_1.sender(),
+        WATCH_BUTTON_2.sender(),
+        WATCH_BUTTON_3.sender(),
+        WATCH_BUTTON_4.sender(),
+        WATCH_BUTTON_5.sender(),
+    ];
 
     loop {
         defmt::debug!("waiting for messages");
         let mut buf = [0; 64];
         match select(CHANNEL.receive(), midi_device.read_packet(&mut buf)).await {
             Either::First(button_message) => handle_button_message(button_message, &mut midi_device).await,
-            Either::Second(Ok(midi_message_size)) => handle_midi_message(&buf, midi_message_size),
+            Either::Second(Ok(midi_message_size)) => handle_midi_message(&buf[..midi_message_size], &config_senders),
             Either::Second(Err(err)) => defmt::warn!("midi error: {}", err),
         };
     }
@@ -118,8 +136,8 @@ async fn handle_button_message(button_message: ButtonMessage, midi_device: &mut 
     };
 }
 
-fn handle_midi_message(message: &[u8], size: usize) {
-    if size != 4 {
+fn handle_midi_message(message: &[u8], config_senders: &[watch::Sender<'static, CriticalSectionRawMutex, ButtonConfig, 2>; 6]) {
+    if message.len() != 4 {
         return;  // wrong size for CC message
     }
     if message[..2] != [0x0b, 0xb0] {
@@ -128,22 +146,14 @@ fn handle_midi_message(message: &[u8], size: usize) {
 
     // received CC message, only controllers 20-26 are valid
     let controller = message[2];
-    let Some(signal) = (match controller - 20 {
-        0 => Some(&SIGNAL_BUTTON_0),
-        1 => Some(&SIGNAL_BUTTON_1),
-        2 => Some(&SIGNAL_BUTTON_2),
-        3 => Some(&SIGNAL_BUTTON_3),
-        4 => Some(&SIGNAL_BUTTON_4),
-        5 => Some(&SIGNAL_BUTTON_5),
-        _ => None,
-    }) else {
-        return;  // received message for unsupported controller
-    };
-
+    if !(20..=26).contains(&controller) {
+        return;  // invalid controller
+    }
+    let sender = &config_senders[usize::from(controller - 20)];
     // set button behavior according to value
     let value = message[3];
     let behavior = ButtonBehavior::from(value);
-    signal.signal(ButtonConfig { behavior: behavior });
+    sender.send(ButtonConfig { behavior: behavior });
 }
 
 type MyUsbDriver = usb::Driver<'static, USB>;
@@ -201,11 +211,11 @@ struct ButtonConfig {
 #[embassy_executor::task(pool_size = 6)]
 async fn button_task(
     id: u8,
-    config_source: &'static Signal<CriticalSectionRawMutex, ButtonConfig>,
+    mut config_source: Receiver<'static, CriticalSectionRawMutex, ButtonConfig, 2>,
     mut button: Input<'static>,
-    sender: Sender<'static, CriticalSectionRawMutex, ButtonMessage, 16>,
+    sender: channel::Sender<'static, CriticalSectionRawMutex, ButtonMessage, 16>,
 ) {
-    let mut behavior = config_source.try_take()
+    let mut behavior = config_source.try_get()
         .map(|conf| conf.behavior)
         .unwrap_or_default();
     let mut prev_state: ButtonState = ButtonState::Off;
@@ -213,7 +223,7 @@ async fn button_task(
     defmt::debug!("starting button{} loop", id);
     loop {
 
-        prev_state = match select(button.wait_for_low(), config_source.wait()).await {
+        prev_state = match select(button.wait_for_low(), config_source.get()).await {
             Either::First(_) => {
                 defmt::debug!(
                     "will signal from button{}, channel has {} elements",
@@ -262,6 +272,16 @@ async fn button_task(
                 ButtonState::Off // reset state
             },
         }
+    }
+}
+
+#[embassy_executor::task]
+async fn save_config_task(receivers: [Receiver<'static, CriticalSectionRawMutex, ButtonConfig, 2>; 6]) {
+    // let [mut receiver0, mut receiver1, mut receiver2, mut receiver3, mut receiver4, mut receiver5] = receivers;
+    loop {
+        Timer::after_secs(2).await;
+        // receivers[0].try_get()
+        defmt::debug!("save config trigger");
     }
 }
 
