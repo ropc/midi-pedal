@@ -29,8 +29,11 @@ embassy-time = { version = "0.5", features = ["defmt", "defmt-timestamp-uptime"]
 cortex-m = { version = "0.7.7" }
 embassy-rp = { version = "0.9", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xa"] }
 embassy-usb = { version = "0.5.1", features = ["defmt"] }
-static_cell = "2.1.1"
-embassy-futures = "0.1.2"
+static_cell = "2.1.*"
+embassy-futures = "0.1.*"
+sequential-storage = { version = "7.1.*", features = ["defmt", "postcard"] }
+postcard = { version = "1.1.*", features = ["defmt"] }
+serde = { version = "1.0.*", default-features = false }
 
 [profile.release]
 debug = 2

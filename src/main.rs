@@ -1,22 +1,33 @@
 #![no_std]
 #![no_main]
 
+use core::ops::Range;
+
 use defmt::Format;
 use embassy_executor::Spawner;
+use embassy_rp::flash::{Async, Flash, PAGE_SIZE};
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::{bind_interrupts, peripherals::USB, usb};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, self};
 use embassy_sync::watch::{Receiver, Watch, self};
-use embassy_time::{with_timeout, Delay, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use embassy_usb::class::midi::MidiClass;
-use embassy_futures::select::{select, select6, select_array, select_slice, Either};
+use embassy_futures::select::{select, select_array, select_slice, Either};
+use sequential_storage::cache::KeyPointerCache;
+use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use static_cell::StaticCell;
+use serde::{Serialize, Deserialize};
 use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
 });
+
+const FLASH_SIZE: usize = 4 * 1024 * 1024;
+// the driver uses offsets, hence not starting at 0x103F8000 like in memory.x
+const FLASH_STORAGE_RANGE: Range<u32> = 0x003F_8000..0x0040_0000;
+const BUFFER_SIZE: usize = PAGE_SIZE;
 
 static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
 static WATCH_BUTTON_0: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
@@ -64,6 +75,33 @@ async fn main(spawner: Spawner) -> ! {
     let usb = usb_builder.build();
     spawner.spawn(usb_task(usb)).unwrap();
 
+    // flash storage setup
+
+    let mut flash = embassy_rp::flash::Flash::<_, Async, FLASH_SIZE>::new(p.FLASH, p.DMA_CH0);
+    let mut map_storage = MapStorage::new(
+        flash,
+        const { MapConfig::new(FLASH_STORAGE_RANGE) },
+        KeyPointerCache::<32, u8, 6>::new()
+    );
+
+    // initialize button watchers
+
+    let mut buf = [0; BUFFER_SIZE];
+    let watchers = [
+        &WATCH_BUTTON_0,
+        &WATCH_BUTTON_1,
+        &WATCH_BUTTON_2,
+        &WATCH_BUTTON_3,
+        &WATCH_BUTTON_4,
+        &WATCH_BUTTON_5
+    ];
+    for index in 0..6 {
+        if let Ok(Some(config)) = map_storage.fetch_item::<ButtonConfig>(&mut buf, &(index as u8)).await {
+            defmt::info!("loaded button{} initial value: {}", index, config);
+            watchers[index].sender().send(config);
+        }
+    }
+
     // button setup
 
     let button0_pin = Input::new(p.PIN_1, Pull::Up);
@@ -81,7 +119,7 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(button_task(4, WATCH_BUTTON_4.receiver().expect("too many receivers for button4"), button4_pin, button_press_sender)).unwrap();
     spawner.spawn(button_task(5, WATCH_BUTTON_5.receiver().expect("too many receivers for button5"), button5_pin, button_press_sender)).unwrap();
 
-    spawner.spawn(save_config_task([
+    spawner.spawn(save_config_task(map_storage, [
         WATCH_BUTTON_0.receiver().expect("too many receivers for button0"),
         WATCH_BUTTON_1.receiver().expect("too many receivers for button1"),
         WATCH_BUTTON_2.receiver().expect("too many receivers for button2"),
@@ -169,7 +207,7 @@ struct ButtonMessage {
     state: ButtonState,
 }
 
-#[derive(Debug, Format, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Format, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum ButtonBehavior {
     #[default]
     Toggle,
@@ -188,6 +226,8 @@ impl From<u8> for ButtonBehavior {
     }
 }
 
+impl PostcardValue<'_> for ButtonBehavior {}
+
 #[derive(Debug, Clone, Copy)]
 enum ButtonState {
     On,
@@ -203,10 +243,12 @@ impl ButtonState {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Format)]
 struct ButtonConfig {
     behavior: ButtonBehavior,
 }
+
+impl PostcardValue<'_> for ButtonConfig {}
 
 #[embassy_executor::task(pool_size = 6)]
 async fn button_task(
@@ -223,7 +265,7 @@ async fn button_task(
     defmt::debug!("starting button{} loop", id);
     loop {
 
-        prev_state = match select(button.wait_for_low(), config_source.get()).await {
+        prev_state = match select(button.wait_for_low(), config_source.changed()).await {
             Either::First(_) => {
                 defmt::debug!(
                     "will signal from button{}, channel has {} elements",
@@ -276,12 +318,39 @@ async fn button_task(
 }
 
 #[embassy_executor::task]
-async fn save_config_task(receivers: [Receiver<'static, CriticalSectionRawMutex, ButtonConfig, 2>; 6]) {
-    // let [mut receiver0, mut receiver1, mut receiver2, mut receiver3, mut receiver4, mut receiver5] = receivers;
+async fn save_config_task(
+    mut map_storage: MapStorage<u8, Flash<'static, embassy_rp::peripherals::FLASH, Async, FLASH_SIZE>, KeyPointerCache<32, u8, 6>>,
+    receivers: [Receiver<'static, CriticalSectionRawMutex, ButtonConfig, 2>; 6])
+{
+    let mut buf = [0; BUFFER_SIZE];
+    let [mut receiver0, mut receiver1, mut receiver2, mut receiver3, mut receiver4, mut receiver5] = receivers;
     loop {
-        Timer::after_secs(2).await;
-        // receivers[0].try_get()
-        defmt::debug!("save config trigger");
+        let (config, index) = select_array([
+            debounced_changed(&mut receiver0),
+            debounced_changed(&mut receiver1),
+            debounced_changed(&mut receiver2),
+            debounced_changed(&mut receiver3),
+            debounced_changed(&mut receiver4),
+            debounced_changed(&mut receiver5),
+        ]).await;
+
+        defmt::info!("storing button{} config: {}", index, config);
+        let result = map_storage.store_item(&mut buf, &(index as u8), &config).await;
+        defmt::debug!("store result: {}", result);
+
+        if let Err(err) = result {
+            defmt::error!("failed to store value. {:?}", err);
+        }
+    }
+}
+
+async fn debounced_changed(recevier: &mut Receiver<'static, CriticalSectionRawMutex, ButtonConfig, 2>) -> ButtonConfig {
+    let mut value = recevier.changed().await;
+    loop {
+        match select(recevier.changed(), Timer::after_secs(2)).await {
+            Either::First(new_value) => value = new_value,  // change was received, restart timer in next loop
+            Either::Second(_) => return value,  // timer elapsed, return unchanged value
+        };
     }
 }
 
