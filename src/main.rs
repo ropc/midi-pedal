@@ -175,7 +175,10 @@ async fn handle_button_message(button_message: ButtonMessage, midi_device: &mut 
     };
 }
 
-fn handle_midi_message(message: &[u8], config_senders: &[watch::Sender<'static, CriticalSectionRawMutex, ButtonConfig, 2>; 6]) {
+fn handle_midi_message(
+    message: &[u8],
+    config_senders: &[watch::Sender<'static, CriticalSectionRawMutex, ButtonConfig, 2>; 6],
+) {
     if message.len() != 4 {
         return;  // wrong size for CC message
     }
@@ -188,10 +191,17 @@ fn handle_midi_message(message: &[u8], config_senders: &[watch::Sender<'static, 
     if !(20..=26).contains(&controller) {
         return;  // invalid controller
     }
+
     let sender = &config_senders[usize::from(controller - 20)];
     // set button behavior according to value
     let value = message[3];
     let behavior = ButtonBehavior::from(value);
+
+    // filter out unchanged behavior
+    if let Some(old_config) = sender.try_get() && old_config.behavior == behavior {
+        return; // no change, don't need to update button
+    }
+
     sender.send(ButtonConfig { behavior: behavior });
 }
 
