@@ -5,7 +5,7 @@ use core::ops::Range;
 
 use defmt::Format;
 use embassy_executor::Spawner;
-use embassy_rp::flash::{Async, Flash, PAGE_SIZE};
+use embassy_rp::flash::{Async, Flash};
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::{bind_interrupts, peripherals::USB, usb};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -13,7 +13,7 @@ use embassy_sync::channel::{Channel, self};
 use embassy_sync::watch::{Receiver, Watch, self};
 use embassy_time::{with_timeout, Duration, Timer};
 use embassy_usb::class::midi::MidiClass;
-use embassy_futures::select::{select, select_array, select_slice, Either};
+use embassy_futures::select::{select, select_array, Either};
 use sequential_storage::cache::KeyPointerCache;
 use sequential_storage::map::{MapConfig, MapStorage, PostcardValue};
 use static_cell::StaticCell;
@@ -27,7 +27,8 @@ bind_interrupts!(struct Irqs {
 const FLASH_SIZE: usize = 4 * 1024 * 1024;
 // the driver uses offsets, hence not starting at 0x103F8000 like in memory.x
 const FLASH_STORAGE_RANGE: Range<u32> = 0x003F_8000..0x0040_0000;
-const BUFFER_SIZE: usize = PAGE_SIZE;
+// technically, this would be aligned/rounded up to 256-byte writes, but this is handled internally by the driver
+const FLASH_BUFFER_SIZE: usize = size_of::<ButtonConfig>() + size_of::<u8>();
 
 static CHANNEL: Channel<CriticalSectionRawMutex, ButtonMessage, 16> = Channel::new();
 static WATCH_BUTTON_0: Watch<CriticalSectionRawMutex, ButtonConfig, 2> = Watch::new();
@@ -86,7 +87,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // initialize button watchers
 
-    let mut buf = [0; BUFFER_SIZE];
+    let mut buf = [0; FLASH_BUFFER_SIZE];
     let watchers = [
         &WATCH_BUTTON_0,
         &WATCH_BUTTON_1,
@@ -322,7 +323,7 @@ async fn save_config_task(
     mut map_storage: MapStorage<u8, Flash<'static, embassy_rp::peripherals::FLASH, Async, FLASH_SIZE>, KeyPointerCache<32, u8, 6>>,
     receivers: [Receiver<'static, CriticalSectionRawMutex, ButtonConfig, 2>; 6])
 {
-    let mut buf = [0; BUFFER_SIZE];
+    let mut buf = [0; FLASH_BUFFER_SIZE];
     let [mut receiver0, mut receiver1, mut receiver2, mut receiver3, mut receiver4, mut receiver5] = receivers;
     loop {
         let (config, index) = select_array([
