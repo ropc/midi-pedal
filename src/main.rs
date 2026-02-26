@@ -80,19 +80,6 @@ async fn main(spawner: Spawner) -> ! {
         KeyPointerCache::<32, u8, 6>::new()
     );
 
-    // initialize button state
-
-    let mut buf = [0; FLASH_BUFFER_SIZE];
-    for index in 0..6 {
-        if let Ok(Some(config)) = map_storage.fetch_item::<ButtonConfig>(&mut buf, &(index as u8)).await {
-            defmt::info!("loaded button{} initial value: {}", index, config);
-            MIDI_INPUT_CHANNEL.publish_immediate(ButtonMessage {
-                button_id: index,
-                payload: config,
-            });
-        }
-    }
-
     // button setup
 
     let button0_pin = Input::new(p.PIN_1, Pull::Up);
@@ -109,6 +96,19 @@ async fn main(spawner: Spawner) -> ! {
     spawner.spawn(button_task(3, MIDI_INPUT_CHANNEL.subscriber().unwrap(), button3_pin, button_press_sender)).unwrap();
     spawner.spawn(button_task(4, MIDI_INPUT_CHANNEL.subscriber().unwrap(), button4_pin, button_press_sender)).unwrap();
     spawner.spawn(button_task(5, MIDI_INPUT_CHANNEL.subscriber().unwrap(), button5_pin, button_press_sender)).unwrap();
+
+    // initialize button state
+
+    let mut buf = [0; FLASH_BUFFER_SIZE];
+    for index in 0..6 {
+        if let Ok(Some(config)) = map_storage.fetch_item::<ButtonConfig>(&mut buf, &(index as u8)).await {
+            defmt::info!("loaded button{} initial value: {}", index, config);
+            MIDI_INPUT_CHANNEL.publish_immediate(ButtonMessage {
+                button_id: index,
+                payload: config,
+            });
+        }
+    }
 
     spawner.spawn(save_config_task(map_storage, MIDI_INPUT_CHANNEL.subscriber().unwrap())).unwrap();
 
@@ -128,7 +128,10 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
-async fn handle_button_message(button_message: ButtonMessage<ButtonState>, midi_device: &mut MidiClass<'static, MyUsbDriver>) {
+async fn handle_button_message(
+    button_message: ButtonMessage<ButtonState>,
+    midi_device: &mut MidiClass<'static, MyUsbDriver>
+) {
     let control_number = button_message.button_id + 20; // use MIDI CC range 20-26
     let value = match button_message.payload {
         ButtonState::On => 127,
@@ -162,13 +165,13 @@ fn handle_midi_message(
         return;  // wrong headers/channel for CC message
     }
 
-    // received CC message, only controllers 20-26 are valid
+    // received CC message, only controllers 30-36 are valid
     let controller = message[2];
-    if !(20..=26).contains(&controller) {
+    if !(30..=36).contains(&controller) {
         return;  // invalid controller
     }
 
-    let index = usize::from(controller - 20);
+    let index = usize::from(controller - 30);
 
     // let sender = &config_senders[usize::from(controller - 20)];
     // set button behavior according to value
