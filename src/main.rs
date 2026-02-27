@@ -173,7 +173,6 @@ fn handle_midi_message(
 
     let index = usize::from(controller - 30);
 
-    // let sender = &config_senders[usize::from(controller - 20)];
     // set button behavior according to value
     let value = message[3];
     let behavior = ButtonBehavior::from(value);
@@ -231,7 +230,7 @@ impl From<u8> for ButtonBehavior {
 
 impl PostcardValue<'_> for ButtonBehavior {}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Format)]
 enum ButtonState {
     On,
     Off,
@@ -260,14 +259,11 @@ async fn button_task(
     mut button: Input<'static>,
     sender: channel::Sender<'static, CriticalSectionRawMutex, ButtonMessage<ButtonState>, 16>,
 ) {
-    let mut behavior = config_source.try_next_message_pure()
-        .filter(|message| message.button_id == id)
-        .map(|conf| conf.payload.behavior)
-        .unwrap_or_default();
+    let mut behavior = ButtonBehavior::default();
     let mut prev_state: ButtonState = ButtonState::Off;
 
     loop {
-        defmt::debug!("button{} listening for messages", id);
+        defmt::debug!("button{} listening for messages. current state: {}", id, prev_state);
 
         prev_state = match select(button.wait_for_low(), config_source.next_message_pure()).await {
             Either::First(_) => {
@@ -290,7 +286,7 @@ async fn button_task(
                     })
                     .await;
 
-                Timer::after_millis(20).await;
+                Timer::after_millis(20).await;  // ignore jitter while pressing down
                 button.wait_for_high().await;
 
                 defmt::debug!("button {} got hi", id);
@@ -304,6 +300,8 @@ async fn button_task(
                         })
                         .await;
                 }
+
+                Timer::after_millis(20).await;  // ignore jitter while releasing
 
                 // return ending state
                 match behavior {
